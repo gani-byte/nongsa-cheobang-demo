@@ -1,7 +1,7 @@
 // 선택지 목록. 출처: 영농일지 입력 항목표 v0.1 3장 (효신 검토 전, "확인 필요" 항목 포함)
 // 효신 검토 결과가 나오면 이 파일만 고치면 된다.
 
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';
 
 export const CROPS = ['토마토', '방울토마토', '딸기'];
 

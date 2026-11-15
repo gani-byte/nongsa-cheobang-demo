@@ -1,6 +1,7 @@
 // 농사 처방 P0 - 화면, 라우팅, 이벤트
 // 화면 구성과 문구는 P0 와이어프레임 v0.1 (261115_허간_기획_P0와이어프레임_v01.html) 기준.
-// 해시 라우팅: #/login #/sent #/setup #/home #/write #/write/{id} #/saved/{id} #/list #/detail/{id} #/excel #/proof #/support #/me
+// v0.2 (11/15 에이전트 전환): 홈 1안 하이브리드(날씨·할 일 한 줄 + 최근 기록 + 대화 입력창), #/chat 대화로 기록하기 (js/agent/)
+// 해시 라우팅: #/login #/sent #/setup #/home #/chat #/write #/write/{id} #/saved/{id} #/list #/detail/{id} #/excel #/proof #/support #/me
 
 import { CONFIG } from './config.js';
 import { APP_VERSION, CROPS, STAGES, PESTICIDE_TYPES, FERTILIZER_TYPES, UNITS_PESTICIDE, UNITS_FERTILIZER, DILUTIONS, AREA_UNITS, SKY, EXCEL_HEADERS, tasksFor, pestsFor } from './constants.js';
@@ -10,6 +11,12 @@ import { getWeather, weatherText, weatherSourceLabel, missingWeather } from './w
 import { todayStr, weekday, newMaterial, emptyRecord, housesOf, cropOf, houseNames, autoText, detailOf, missingFields, isBackfill, fmtDateTime, recentNames } from './records.js';
 import { buildSheet1Rows, buildWorkbook, fileName, downloadBlob, canShareFile, shareBlob } from './excel.js';
 import { DEMO_PROFILE, buildDemoRecords } from './demo.js';
+import { createAgent } from './agent/agent.js';
+import { vChat, chatBar, demoTalks, DEMO_TALKS } from './agent/chat-view.js';
+import { runExtractTests } from './agent/extract-rules.js';
+
+// 브라우저 콘솔에서 규칙 추출 단위 테스트: ncAgentTests()
+window.ncAgentTests = () => runExtractTests();
 
 const $app = document.getElementById('app');
 const S = {
@@ -30,7 +37,26 @@ const S = {
   todayWx: null,
   installEvt: null,
   busy: false,
+  agent: null,
+  agentEdit: '',
+  chatText: '',
+  listening: false,
+  recog: null,
+  keepScroll: false,
 };
+
+function getAgent() {
+  if (!S.agent) {
+    S.agent = createAgent({
+      getProfile: () => S.profile,
+      getSession: () => S.session,
+      getRecords: () => S.records,
+      onUpdate: () => { if (S.route === 'chat') renderKeep(); },
+    });
+    S.agent.start();
+  }
+  return S.agent;
+}
 
 // ---------- 유틸 ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -73,7 +99,7 @@ function locShort() {
 }
 
 // ---------- 레이아웃 ----------
-const TAB_OF = { home: 'home', me: 'home', write: 'list', saved: 'list', list: 'list', detail: 'list', excel: 'list', proof: 'proof', support: 'support' };
+const TAB_OF = { home: 'home', chat: 'home', me: 'home', write: 'list', saved: 'list', list: 'list', detail: 'list', excel: 'list', proof: 'proof', support: 'support' };
 
 function layout(inner, route) {
   const tab = TAB_OF[route];
@@ -171,11 +197,12 @@ function li(r) {
   const mats = (r.materials || []).map((x) => `${x.kind} ${x.action}`).join(', ');
   const inc = missingFields(r).length;
   const title = r.task || r.stage || '작업 미입력';
+  const chat = r.input_mode === 'chat' || r.input_mode === 'chat-handoff';
   return `<div class="li" ${attr({ act: 'openDetail', v: r.id })}>
     <div class="dt"><b>${d}</b><span>${m}월 ${weekday(r.workDate)}</span></div>
     <div class="ct"><p><b>${esc(title)}</b> <span class="t2">${esc(houseNames(S.profile, r.houseIds))} ${esc(r.crop)}</span></p>
       <p class="s">${esc(weatherText(r.weather))}${mats ? ' · ' + esc(mats) : ''}</p></div>
-    <div class="tags">${inc ? '<span class="tag inc">미완성</span>' : ''}${r.demo ? '<span class="tag demo">가상</span>' : ''}</div>
+    <div class="tags">${inc ? '<span class="tag inc">미완성</span>' : ''}${chat ? '<span class="tag ac">대화</span>' : ''}${r.demo ? '<span class="tag demo">가상</span>' : ''}</div>
   </div>`;
 }
 
@@ -185,24 +212,30 @@ function weatherLine(w, sub) {
   return `<div class="wx${miss ? ' miss' : ''}"><div class="sq">${miss ? '미수집' : esc(w.sky || '-')}</div><div class="sp"><b>${esc(t)}</b><div class="mut">${esc(sub)}</div></div></div>`;
 }
 
+// 홈 1안 하이브리드 (에이전트 전환 기획서 v1.0): 위 날씨·할 일 카드 한 줄 / 가운데 최근 기록 / 아래 대화 입력창+마이크
+// 기존 버튼(직접 입력, 전체, 보기, 내 농장)은 유지하고 대화 입력을 주 동선으로 둠
 function vHome() {
   const st = monthStats();
-  const today = todayStr();
-  const prog = CONFIG.showProgressLine
-    ? `<div class="prog"><b style="color:var(--ac)">${st.month}월 기록 ${st.days}일</b><span class="t2">· 빠진 항목 ${st.inc}건</span><span class="sp"></span><button class="lnk" data-act="listInc">보기</button></div>`
-    : '';
   const recent = S.records.slice(0, 3).map(li).join('');
-  const wsub = `${locShort()} · ${weatherSourceLabel(S.todayWx)}`;
+  const w = S.todayWx;
+  const miss = !w || w.status === 'missing';
+  const todo = CONFIG.showProgressLine ? `<button class="hbc" data-act="listInc"><span class="mut">할 일 · ${st.month}월 기록 ${st.days}일</span><b>${st.inc ? `빠진 항목 ${st.inc}건` : '빠진 항목 없음'}</b><span class="lnk sm">보기</span></button>` : '';
   return `<section class="scr">
     <div class="hd"><h1>${esc(S.profile.farmName)}</h1><button class="ic" data-act="go" data-v="me" aria-label="내 농장">내</button></div>
     <div class="bd">
-      ${prog}
-      <button class="big" style="padding:30px 0;font-size:20px" data-act="newRecord">오늘 일지 쓰기<br><span style="font-size:13px;font-weight:400;opacity:.85">${mdText(today)} · 30초면 끝나요</span></button>
-      <div style="margin-bottom:12px">${weatherLine(S.todayWx, wsub)}</div>
-      <div class="card"><div class="row" style="margin-bottom:4px"><h3 style="margin:0">최근 기록</h3><span class="sp"></span><button class="lnk" data-act="go" data-v="list">전체</button></div>
-        ${recent || '<p class="empty">아직 기록이 없어요. 위 버튼으로 첫 일지를 써보세요</p>'}
+      <div class="hb">
+        <div class="hbc${miss ? ' miss' : ''}" title="${esc(weatherSourceLabel(w))}"><span class="mut">오늘 날씨 · ${esc(locShort())}</span><b>${esc(weatherText(w))}</b><span class="mut">${esc(mdText(todayStr()))}</span></div>
+        ${todo}
       </div>
-    </div></section>`;
+      <div class="card"><div class="row" style="margin-bottom:4px"><h3 style="margin:0">최근 기록</h3><span class="sp"></span><button class="lnk" data-act="go" data-v="list">전체</button></div>
+        ${recent || '<p class="empty">아직 기록이 없어요. 아래 입력창에 오늘 한 작업을 남겨 보세요</p>'}
+      </div>
+      <button class="ghost" data-act="newRecord">직접 입력으로 일지 쓰기</button>
+      ${demoTalks(false)}
+    </div>
+    <p class="chint">말이나 글로 남기면 일지 항목으로 정리해 드려요</p>
+    ${chatBar(S)}
+  </section>`;
 }
 
 // ---------- 화면: 일지 쓰기 ----------
@@ -369,6 +402,7 @@ function vDetail() {
       ${m.pest ? `<div class="kv"><span class="k">대상 병해충</span><span class="v">${esc(m.pest)}</span></div>` : ''}</div>`;
   });
   h += `<div class="card"><h3>세부작업내용</h3><p style="line-height:1.5">${esc(detailOf(S.profile, r))}</p>${r.memo ? `<p class="mut" style="margin-top:6px">메모: ${esc(r.memo)}</p>` : ''}</div>`;
+  if (r.source_text) h += `<div class="card"><h3>대화 원문</h3><p style="line-height:1.5">"${esc(r.source_text)}"</p><p class="mut" style="margin-top:6px">입력 방식: ${r.input_mode === 'chat-handoff' ? '대화 후 직접 입력' : '대화'} · 추출 ${esc(r.extract_method || '규칙')}</p></div>`;
   h += `<div class="card" style="background:#FAFAFA"><p class="mut" style="line-height:1.6">작성 ${esc(fmtDateTime(r.createdAt))} · ${r.updatedAt ? '수정 ' + esc(fmtDateTime(r.updatedAt)) : '수정 없음'} · 작성자 ${esc(r.author || '')}${isBackfill(r) ? ' · 사후입력' : ''}${r.demo ? ' · 가상 데이터' : ''} (엑셀 시트2)</p></div>`;
   if (ed) h += `<button class="ghost danger" ${attr({ act: 'deleteRecord', v: r.id })}>삭제</button>`;
   return `<section class="scr">
@@ -475,7 +509,7 @@ function vMe() {
 }
 
 // ---------- 렌더 ----------
-const VIEWS = { login: vLogin, sent: vSent, setup: vSetup, home: vHome, write: vWrite, saved: vSaved, list: vList, detail: vDetail, excel: vExcel, proof: vProof, support: vSupport, me: vMe };
+const VIEWS = { login: vLogin, sent: vSent, setup: vSetup, home: vHome, chat: () => { getAgent(); return vChat(S); }, write: vWrite, saved: vSaved, list: vList, detail: vDetail, excel: vExcel, proof: vProof, support: vSupport, me: vMe };
 
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
@@ -504,14 +538,42 @@ function render() {
   S.route = r;
   S.param = param;
   $app.innerHTML = layout(VIEWS[r](), r);
+  if (r === 'chat' && !S.keepScroll) {
+    const b = document.getElementById('chatBd');
+    if (b) b.scrollTop = b.scrollHeight;
+  }
 }
 
 function renderKeep() {
   const bd = $app.querySelector('.bd');
   const top = bd ? bd.scrollTop : 0;
-  render();
+  S.keepScroll = true;
+  try { render(); } finally { S.keepScroll = false; }
   const bd2 = $app.querySelector('.bd');
   if (bd2) bd2.scrollTop = top;
+}
+
+// ---------- 대화 ----------
+async function talk(text, label) {
+  const ag = getAgent();
+  S.agentEdit = '';
+  if (S.route !== 'chat') location.hash = '#/chat';
+  const p = ag.send(text, label);
+  render();
+  const res = await p;
+  if (res?.action === 'saved') await reload();
+  if (res?.action === 'handoff') return handoffTo(res.form);
+  if (res?.action === 'go') { render(); setTimeout(() => go(res.to), 500); return; }
+  render();
+}
+
+function handoffTo(form) {
+  S.form = form;
+  S.wxEdit = false;
+  S.detailEditing = false;
+  if (!S.form.weather) loadFormWeather();
+  toast('대화에서 알아낸 값을 채워 둬어요');
+  go('write');
 }
 
 async function reload() {
@@ -568,6 +630,7 @@ const ACTIONS = {
   async logout() {
     if (!confirm('로그아웃할까요?')) return;
     await auth.signOut();
+    S.agent = null;
     S.session = null;
     S.profile = null;
     S.records = [];
@@ -636,6 +699,62 @@ const ACTIONS = {
     await S.installEvt.userChoice;
     S.installEvt = null;
     render();
+  },
+
+  // 대화로 기록하기
+  async chatSend() {
+    const el = document.getElementById('chatInput');
+    const t = ((el && el.value) || S.chatText || '').trim();
+    if (!t) { el && el.focus(); return; }
+    S.chatText = '';
+    await talk(t);
+  },
+  async agQuick(el) {
+    await talk(el.dataset.v, el.dataset.l);
+  },
+  agEdit(el) {
+    S.agentEdit = el.dataset.k || '';
+    renderKeep();
+  },
+  agSet(el) {
+    getAgent().setField(el.dataset.k, el.dataset.v);
+    if (/remove$/.test(el.dataset.k)) S.agentEdit = '';
+    renderKeep();
+  },
+  async agSave() {
+    await talk('__save', '저장');
+  },
+  agForm() {
+    handoffTo(getAgent().toForm());
+  },
+  async demoTalk(el) {
+    const d = DEMO_TALKS[Number(el.dataset.v)];
+    if (!d) return;
+    for (const t of d.texts) await talk(t);
+  },
+  // 마이크: Web Speech API(ko-KR) 있으면 사용, 없으면 키보드 받아쓰기 안내
+  mic() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      toast('이 브라우저는 음성 인식을 지원하지 않아요. 키보드 받아쓰기를 써주세요 (키보드의 마이크 버튼)');
+      document.getElementById('chatInput')?.focus();
+      return;
+    }
+    if (S.recog) { S.recog.stop(); return; }
+    const r = new SR();
+    r.lang = 'ko-KR';
+    r.interimResults = false;
+    r.maxAlternatives = 1;
+    r.onresult = (e) => {
+      const t = e.results?.[0]?.[0]?.transcript || '';
+      if (t) talk(t);
+    };
+    r.onerror = (e) => toast(e.error === 'not-allowed' || e.error === 'service-not-allowed' ? '마이크를 쓸 수 없어요. 키보드 받아쓰기를 써주세요' : '잘 못 들었어요. 다시 눌러 주세요');
+    r.onend = () => { S.recog = null; S.listening = false; renderKeep(); };
+    S.recog = r;
+    S.listening = true;
+    try { r.start(); } catch (e) { S.recog = null; S.listening = false; toast('키보드 받아쓰기를 써주세요'); }
+    renderKeep();
   },
 
   // 일지 쓰기
@@ -838,6 +957,8 @@ function onInput(e) {
   const k = el.dataset.in;
   if (!k) return;
   const v = el.value;
+  if (k === 'chat') { S.chatText = v; return; }
+  if (k === 'ag') { getAgent().setField(el.dataset.k, v, true); return; }
   if (k === 'setup') setupDraft()[el.dataset.k] = v;
   else if (k === 'house') setupDraft().houses[Number(el.dataset.i)][el.dataset.k] = v;
   else if (k === 'mat') S.form.materials[Number(el.dataset.i)][el.dataset.k] = v;
@@ -865,6 +986,9 @@ function onChange(e) {
       loadFormWeather();
     }
     renderKeep();
+  } else if (k === 'agDate') {
+    getAgent().setField('workDate', el.value);
+    renderKeep();
   } else if (k === 'xFrom' || k === 'xTo') {
     S.excel[k === 'xFrom' ? 'from' : 'to'] = el.value;
     renderKeep();
@@ -890,6 +1014,11 @@ $app.addEventListener('input', onInput);
 $app.addEventListener('change', onChange);
 $app.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.id === 'email') ACTIONS.sendLink();
+  // 한글 조합 중(IME) Enter 는 무시
+  if (e.key === 'Enter' && e.target.id === 'chatInput' && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    ACTIONS.chatSend().catch((err) => toast('오류: ' + err.message));
+  }
 });
 window.addEventListener('hashchange', render);
 window.addEventListener('beforeinstallprompt', (e) => {

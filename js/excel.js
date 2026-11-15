@@ -50,7 +50,15 @@ export function buildSheet1Rows(profile, records) {
 const SHEET2_HEADERS = [
   '기록ID', '작업일', '시트1 행 번호', '작성시각', '수정시각', '사후입력 여부', '작성자', '작성자 이메일',
   '농장 위치', '하늘상태', '최저기온(℃)', '최고기온(℃)', '강수량(mm)', '날씨 출처', '미완성 항목', '영수증 사진 링크', '가상(데모) 데이터',
+  '입력 방식', '원문 발화',
 ];
+
+// 입력 방식: 직접 / 대화(규칙|AI) / 대화 후 직접 입력(규칙|AI)  (입력 항목표 v0.2 "추출 방식")
+function inputModeText(r) {
+  if (r.input_mode === 'chat') return `대화(${r.extract_method || '규칙'})`;
+  if (r.input_mode === 'chat-handoff') return `대화 후 직접 입력(${r.extract_method || '규칙'})`;
+  return '직접';
+}
 
 function excelSerialDate(ymd) {
   const [y, m, d] = ymd.split('-').map(Number);
@@ -109,6 +117,8 @@ export async function buildWorkbook(profile, session, records) {
       missingFields(r).join(', ') || null,
       null, // 영수증 사진 (P1)
       r.demo ? 'Y' : 'N',
+      inputModeText(r),
+      r.source_text || null,
     ]);
   });
   const ws2 = XLSX.utils.aoa_to_sheet(aoa2);
@@ -120,7 +130,7 @@ export async function buildWorkbook(profile, session, records) {
     const u = excelSerialDateTime(r.updatedAt);
     if (u != null) ws2[XLSX.utils.encode_cell({ r: R, c: 4 })] = { t: 'n', v: u, z: 'yyyy-mm-dd hh:mm:ss' };
   });
-  ws2['!cols'] = [18, 12, 10, 19, 19, 10, 10, 22, 22, 10, 10, 10, 10, 16, 24, 18, 12].map((w) => ({ wch: w }));
+  ws2['!cols'] = [18, 12, 10, 19, 19, 10, 10, 22, 22, 10, 10, 10, 10, 16, 24, 18, 12, 18, 50].map((w) => ({ wch: w }));
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws1, '영농기록장');

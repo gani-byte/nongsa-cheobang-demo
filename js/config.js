@@ -13,10 +13,19 @@ export const CONFIG = {
   weather: 'mock',
   weatherProxyUrl: '', // 예: 'https://asia-northeast3-nongsacheobang.cloudfunctions.net/weather'
 
-  // 첫 화면 안: 1 = 바로 기록형(추천, 구현됨) | 2 = 대시보드형 | 3 = 진행도·증빙형 (게이트1 결정 후)
+  // 첫 화면: v0.2 부터 1안 하이브리드(날씨·할 일 한 줄 + 최근 기록 + 대화 입력창) 고정. 다른 안은 게이트1 결정 후
   homeVariant: 1,
-  // 홈 상단 "이번 달 기록 N일 · 빠진 항목 M건" 한 줄 (1안 + 3안 일부)
+  // 홈 상단 할 일 카드 (이번 달 기록 N일 · 빠진 항목 M건)
   showProgressLine: true,
+
+  // 대화 입력(에이전트): 'rules' (규칙 기반 추출, 지금 동작, AI 호출 0원) | 'llm' (Cloud Functions -> Vertex AI Gemini, 연결 자리)
+  // llm 실패·지연(agentTimeoutMs 초과)·하루 한도 초과 시 자동으로 rules 로 폴백. 모델 ID 는 은퇴·가격 변경에 대비해 설정값으로 둔다.
+  agentMode: 'rules',
+  agentEndpoint: '', // 예: 'https://asia-northeast3-nongsacheobang.cloudfunctions.net/agent' (서버 배포 후)
+  agentModel: 'gemini-3.1-flash-lite',
+  agentTimeoutMs: 5000,
+  agentDailyLimit: 30, // 1인 하루 AI 대화 (기획서 6-3, 결정 필요)
+  agentMaxInput: 500, // 1회 입력 길이
 
   // P0 범위 스위치 (게이트2에서 최종 확정). 시간 부족 시 끄는 순서: editDelete -> (날씨 고정) -> pwa
   features: {
