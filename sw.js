@@ -1,6 +1,6 @@
 // 서비스 워커: 정적 파일 캐시 (오프라인에서도 앱 화면이 열리게)
 // 파일을 바꾸면 CACHE 이름의 버전을 올린다.
-const CACHE = 'nongsa-cheobang-v0.2.1';
+const CACHE = 'nongsa-cheobang-v0.2.2';
 const ASSETS = [
   './',
   './index.html',
@@ -29,7 +29,8 @@ const ASSETS = [
 const CDN_CACHE = ['https://cdn.sheetjs.com/'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' = 브라우저 HTTP 캐시(GitHub Pages max-age 10분)를 건너뛰고 새 파일을 받는다 (v0.2.2)
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -60,7 +61,7 @@ self.addEventListener('fetch', (e) => {
   e.respondWith(
     caches.open(CACHE).then(async (c) => {
       const hit = await c.match(req);
-      const net = fetch(req).then((res) => {
+      const net = fetch(req, { cache: 'no-cache' }).then((res) => {
         if (res && (res.ok || res.type === 'opaque')) c.put(req, res.clone());
         return res;
       }).catch(() => hit);
