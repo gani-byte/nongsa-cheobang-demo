@@ -203,11 +203,6 @@ export function createAgent(deps) {
       const c = deps.getProfile().houses.find((h) => h.id === v[0])?.crop;
       if (c && !d.crop) d.crop = c;
     } else if (key === 'crop') d.crop = v;
-    // 작목이 나중에 정해져 세부작업이 그 작목 목록에 없으면 작업단계만 남김 (예: 딸기에 '유인·곁순 제거')
-    if ((key === 'houseIds' || key === 'crop') && d.task && !(tasksFor(d.crop)[d.stage] || []).includes(d.task)) {
-      d.task = '';
-      if (!d.guessed.includes('stage')) d.guessed.push('stage');
-    }
     else if (key === 'stage') { d.stage = v.stage; d.task = v.task || ''; }
     else {
       const [, i, f] = key.match(/^m(\d+)\.(\w+)$/);
@@ -216,6 +211,11 @@ export function createAgent(deps) {
       else m[f] = v;
     }
     d.guessed = d.guessed.filter((g) => g !== key);
+    // 작목이 나중에 정해져 세부작업이 그 작목 목록에 없으면 작업단계만 남김 (예: 딸기에 '유인·곁순 제거')
+    if ((key === 'houseIds' || key === 'crop') && d.task && !(tasksFor(d.crop)[d.stage] || []).includes(d.task)) {
+      d.task = '';
+      if (!d.guessed.includes('stage')) d.guessed.push('stage');
+    }
   }
 
   function proceed() {
