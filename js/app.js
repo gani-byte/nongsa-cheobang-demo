@@ -560,7 +560,16 @@ async function talk(text, label) {
   if (S.route !== 'chat') location.hash = '#/chat';
   const p = ag.send(text, label);
   render();
-  const res = await p;
+  let res;
+  try {
+    res = await p;
+  } catch (err) {
+    // 대화 처리 중 오류가 나도 "정리하는 중"에 멈추지 않게 다시 그리고 직접 입력을 안내
+    console.error(err);
+    render();
+    toast('처리하지 못했어요. 직접 입력으로 기록해 주세요');
+    return;
+  }
   if (res?.action === 'saved') await reload();
   if (res?.action === 'handoff') return handoffTo(res.form);
   if (res?.action === 'go') { render(); setTimeout(() => go(res.to), 500); return; }
