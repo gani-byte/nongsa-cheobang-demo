@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#1F7A4D"/>
+  <!-- 잎 -->
+  <path d="M256 120c-70 30-104 92-92 160 62-4 108-48 116-112 4-18-6-40-24-48z" fill="#E3F1EA"/>
+  <path d="M256 120c70 30 104 92 92 160-62-4-108-48-116-112-4-18 6-40 24-48z" fill="#BFDCCB"/>
+  <rect x="244" y="230" width="24" height="120" rx="12" fill="#E3F1EA"/>
+  <!-- 기록장 줄 -->
+  <rect x="136" y="360" width="240" height="22" rx="11" fill="#FFFFFF"/>
+  <rect x="176" y="400" width="160" height="18" rx="9" fill="#BFDCCB"/>
+</svg>

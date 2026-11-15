@@ -1,0 +1,13 @@
+# 비밀값·로컬 설정은 커밋하지 않는다
+.env
+.env.*
+*.local.js
+js/config.local.js
+serviceAccount*.json
+*-firebase-adminsdk-*.json
+.firebase/
+firebase-debug.log
+node_modules/
+*.zip
+Thumbs.db
+.DS_Store

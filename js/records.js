@@ -1,0 +1,119 @@
+// 일지 레코드 공통 로직: 빈 레코드, 작목 자동, 세부작업내용 자동 문장, 미완성 판정
+
+import { WEEKDAYS } from './constants.js';
+
+export function todayStr(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+export function weekday(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return WEEKDAYS[new Date(y, m - 1, d).getDay()];
+}
+
+export function newMaterial(kind = '농약') {
+  return { kind, action: '사용', type: '', name: '', qty: '', unit: kind === '농약' ? 'mL' : 'kg', dilution: '', pest: '' };
+}
+
+export function emptyRecord(profile) {
+  const first = profile?.houses?.[0];
+  return {
+    id: null,
+    workDate: todayStr(),
+    houseIds: first ? [first.id] : [],
+    crop: first ? first.crop : '',
+    cropManual: false,
+    weather: null,
+    stage: '',
+    task: '',
+    materials: [],
+    area: { value: '', unit: '㎡' },
+    detail: '',
+    detailEdited: false,
+    memo: '',
+  };
+}
+
+export function housesOf(profile, ids) {
+  const hs = profile?.houses || [];
+  return (ids || []).map((id) => hs.find((h) => h.id === id)).filter(Boolean);
+}
+
+// 선택한 동에 연결된 작목. 여러 작목이 섞이면 첫 동 기준
+export function cropOf(profile, ids) {
+  const hs = housesOf(profile, ids);
+  return hs.length ? hs[0].crop : '';
+}
+
+export function houseNames(profile, ids) {
+  return housesOf(profile, ids).map((h) => h.name).join(', ');
+}
+
+// 엑셀 B열: "1동(가상리 123), 2동(가상리 124)"
+export function plotsText(profile, ids) {
+  return housesOf(profile, ids).map((h) => (h.lot ? `${h.name}(${h.lot})` : h.name)).join(', ');
+}
+
+export function qtyText(m) {
+  return m.qty !== '' && m.qty != null ? `${m.qty}${m.unit || ''}` : '';
+}
+
+// 세부작업내용 자동 문장. 예: "1동 토마토 병해충 방제, 잿빛곰팡이병 대상 가상곰팡이 액상 100mL (1000배) 사용"
+export function autoText(profile, r) {
+  const names = houseNames(profile, r.houseIds);
+  let s = [names, r.crop, r.task || r.stage || '작업'].filter(Boolean).join(' ');
+  (r.materials || []).forEach((m) => {
+    if (!m.name && !m.type) return;
+    const label = m.name || `${m.type}`;
+    s += `, ${m.pest ? m.pest + ' 대상 ' : ''}${label} ${qtyText(m) || '(양 미입력)'}${m.dilution ? ` (${m.dilution}배)` : ''} ${m.action}`;
+  });
+  if (r.area && r.area.unit === '동 전체') s += ', 동 전체';
+  else if (r.area && r.area.value) s += `, 처리 면적 ${r.area.value}${r.area.unit}`;
+  return s;
+}
+
+export function detailOf(profile, r) {
+  return r.detailEdited && r.detail ? r.detail : autoText(profile, r);
+}
+
+// 필수 항목 빈칸 목록 (빈칸이어도 저장은 되고 "미완성" 표시)
+export function missingFields(r) {
+  const a = [];
+  if (!r.workDate) a.push('작업일');
+  if (!r.houseIds || !r.houseIds.length) a.push('하우스 동');
+  if (!r.crop) a.push('작목');
+  if (!r.stage) a.push('작업단계');
+  (r.materials || []).forEach((m) => {
+    if (!m.type) a.push(`${m.kind} 종류`);
+    if (!m.name) a.push(`${m.kind} 제품명`);
+    if (m.qty === '' || m.qty == null) a.push(`${m.kind} 양`);
+    if (!m.unit) a.push(`${m.kind} 단위`);
+  });
+  return a;
+}
+
+// 사후입력: 작업일보다 늦은 날에 처음 작성한 기록
+export function isBackfill(r) {
+  if (!r.createdAt) return false;
+  return r.workDate < todayStr(new Date(r.createdAt));
+}
+
+export function fmtDateTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${todayStr(d)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// 제품명 최근 사용 목록 (최근 기록 순, 최대 6개)
+export function recentNames(records, kind) {
+  const out = [];
+  for (const r of records) {
+    for (const m of r.materials || []) {
+      if (m.kind === kind && m.name && !out.includes(m.name)) out.push(m.name);
+      if (out.length >= 6) return out;
+    }
+  }
+  return out;
+}

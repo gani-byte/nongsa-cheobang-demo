@@ -1,0 +1,17 @@
+rules_version = '2';
+// 초안 (아직 배포 안 함). 본인 uid 문서만 읽기/쓰기.
+// TODO: createdAt 서버 시각 강제, 필드 타입·크기 검증, 날씨 캐시(weatherCache)는 Functions 만 쓰기
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      match /records/{recordId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+    match /weatherCache/{key} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+  }
+}

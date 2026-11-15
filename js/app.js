@@ -1,0 +1,920 @@
+// 농사 처방 P0 - 화면, 라우팅, 이벤트
+// 화면 구성과 문구는 P0 와이어프레임 v0.1 (261115_허간_기획_P0와이어프레임_v01.html) 기준.
+// 해시 라우팅: #/login #/sent #/setup #/home #/write #/write/{id} #/saved/{id} #/list #/detail/{id} #/excel #/proof #/support #/me
+
+import { CONFIG } from './config.js';
+import { APP_VERSION, CROPS, STAGES, PESTICIDE_TYPES, FERTILIZER_TYPES, UNITS_PESTICIDE, UNITS_FERTILIZER, DILUTIONS, AREA_UNITS, SKY, EXCEL_HEADERS, tasksFor, pestsFor } from './constants.js';
+import { getStore } from './storage/index.js';
+import { auth, isValidEmail, DEMO_EMAIL } from './auth.js';
+import { getWeather, weatherText, weatherSourceLabel, missingWeather } from './weather.js';
+import { todayStr, weekday, newMaterial, emptyRecord, housesOf, cropOf, houseNames, autoText, detailOf, missingFields, isBackfill, fmtDateTime, recentNames } from './records.js';
+import { buildSheet1Rows, buildWorkbook, fileName, downloadBlob, canShareFile, shareBlob } from './excel.js';
+import { DEMO_PROFILE, buildDemoRecords } from './demo.js';
+
+const $app = document.getElementById('app');
+const S = {
+  session: null,
+  profile: null,
+  records: [],
+  store: null,
+  route: 'login',
+  param: null,
+  form: null,
+  wxEdit: false,
+  detailEditing: false,
+  listFilter: 'all',
+  excel: { period: 'month', from: '', to: '' },
+  setup: null,
+  setupErr: '',
+  loginErr: '',
+  todayWx: null,
+  installEvt: null,
+  busy: false,
+};
+
+// ---------- 유틸 ----------
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const attr = (o) => Object.entries(o).map(([k, v]) => `data-${k}="${esc(v)}"`).join(' ');
+
+let toastTimer;
+function toast(msg) {
+  let t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.style.display = 'none'), 2000);
+}
+
+function go(route) {
+  if (location.hash === '#/' + route) render();
+  else location.hash = '#/' + route;
+}
+
+function isDemoView() {
+  return !!(S.session?.demo || S.profile?.demo || S.records.some((r) => r.demo));
+}
+
+function mdText(dateStr) {
+  const [, m, d] = dateStr.split('-').map(Number);
+  return `${m}월 ${d}일 (${weekday(dateStr)})`;
+}
+
+function chips(list, selected, act, extra = {}) {
+  return list.map((x) => {
+    const on = Array.isArray(selected) ? selected.includes(x) : selected === x;
+    return `<button class="chip${on ? ' on' : ''}" ${attr({ act, v: x, ...extra })}>${esc(x)}</button>`;
+  }).join('');
+}
+
+function locShort() {
+  const p = (S.profile?.location || '').trim().split(/\s+/);
+  return p[p.length - 1] || '';
+}
+
+// ---------- 레이아웃 ----------
+const TAB_OF = { home: 'home', me: 'home', write: 'list', saved: 'list', list: 'list', detail: 'list', excel: 'list', proof: 'proof', support: 'support' };
+
+function layout(inner, route) {
+  const tab = TAB_OF[route];
+  const tabs = tab
+    ? `<nav class="tabs">${[['home', '홈'], ['list', '일지'], ['proof', '증빙'], ['support', '지원금']].map(([t, l]) => `<button class="${t === tab ? 'on' : ''}" ${attr({ act: 'go', v: t })}><i></i>${l}</button>`).join('')}</nav>`
+    : '';
+  const badge = isDemoView() ? '<div class="demo-badge">가상 데이터 (데모)</div>' : '';
+  return `${badge}${inner}<div class="toast" id="toast"></div>${tabs}`;
+}
+
+// ---------- 화면: 로그인 ----------
+function vLogin() {
+  const demoNote = CONFIG.auth === 'demo' ? '<p class="mut ctr" style="margin-top:6px">지금은 시연 모드라 실제 메일은 보내지 않아요</p>' : '';
+  return `<section class="scr"><div class="bd white">
+    <img class="logo" src="icons/icon.svg" alt="농사 처방">
+    <h2 class="ctr" style="font-size:22px">농사 처방</h2>
+    <p class="ctr t2" style="margin:6px 0 34px">기록하면 표준 영농기록장 엑셀이 바로 나와요</p>
+    <div class="fld"><label for="email">이메일</label><input class="inp" id="email" type="email" inputmode="email" autocomplete="email" placeholder="이메일 주소" value="${esc(auth.getPendingEmail())}">
+      ${S.loginErr ? `<p class="err">${esc(S.loginErr)}</p>` : ''}</div>
+    <button class="big sm" data-act="sendLink">로그인 링크 받기</button>
+    <p class="mut ctr" style="line-height:1.6">비밀번호 없이, 메일로 온 링크를 누르면 로그인돼요<br>(Firebase 이메일 링크 로그인)</p>
+    ${demoNote}
+    <div style="border-top:1px solid #EEE;margin:26px 0 16px"></div>
+    <button class="ghost" data-act="demoAccount">데모 계정으로 둘러보기</button>
+    <p class="mut ctr">심사·시연용 데모 계정은 바로 홈으로 이동</p>
+  </div></section>`;
+}
+
+function vSent() {
+  const email = auth.getPendingEmail();
+  const demo = CONFIG.auth === 'demo';
+  return `<section class="scr">
+    <div class="hd"><button class="bk" data-act="go" data-v="login" aria-label="뒤로">&lt;</button><h1>메일 확인</h1></div>
+    <div class="bd white">
+      <div class="ph" style="height:150px;margin:24px 0">메일</div>
+      <h2 class="ctr" style="font-size:19px;margin-bottom:8px">로그인 링크를 보냈어요</h2>
+      <p class="ctr t2" style="line-height:1.6"><b>${esc(email)}</b><br>메일함에서 [농사 처방 로그인] 링크를 눌러주세요.<br>링크는 1시간 동안 유효해요.</p>
+      ${demo ? `<div class="card" style="margin-top:24px;background:#FAFAFA">
+        <h3>메일 미리보기 (시연)</h3>
+        <p style="font-size:13px;line-height:1.6">제목: 농사 처방 로그인 링크<br>본문: 아래 버튼을 누르면 로그인됩니다.</p>
+        <button class="big sm" style="margin:10px 0 0" data-act="completeDemoLink">링크 누르기 (시연)</button>
+      </div>` : ''}
+      <button class="lnk" style="display:block;margin:10px auto" data-act="resend">메일이 안 왔어요. 다시 보내기</button>
+    </div></section>`;
+}
+
+// ---------- 화면: 농장·하우스 동 등록 ----------
+function setupDraft() {
+  if (S.setup) return S.setup;
+  const p = S.profile;
+  S.setup = p
+    ? JSON.parse(JSON.stringify({ name: p.name, farmName: p.farmName, location: p.location, houses: p.houses }))
+    : { name: '', farmName: '', location: '', houses: [{ id: 'h1', name: '1동', lot: '', crop: '토마토' }] };
+  return S.setup;
+}
+
+function vSetup() {
+  const d = setupDraft();
+  const editing = !!S.profile;
+  const houses = d.houses.map((h, i) => `<div class="house">
+      <div class="row"><input class="inp sm" style="width:90px;flex:none" placeholder="동 이름" value="${esc(h.name)}" ${attr({ in: 'house', i, k: 'name' })}>
+        <input class="inp sm" placeholder="지번 (예: OO리 123)" value="${esc(h.lot)}" ${attr({ in: 'house', i, k: 'lot' })}>
+        ${d.houses.length > 1 ? `<button class="lnk danger" ${attr({ act: 'rmHouse', i })}>삭제</button>` : ''}</div>
+      <div class="row"><span class="mut" style="width:34px">작목</span><div class="chips">${chips(CROPS, h.crop, 'houseCrop', { i })}</div></div>
+    </div>`).join('');
+  return `<section class="scr">
+    <div class="hd">${editing ? '<button class="bk" data-act="go" data-v="me" aria-label="뒤로">&lt;</button>' : ''}<h1>${editing ? '하우스 동·작목 관리' : '처음 설정'}</h1><span class="mut">${editing ? '' : '최초 1회'}</span></div>
+    <div class="bd">
+      ${editing ? '' : '<div class="step"><i class="on"></i><i class="on"></i><i></i></div>'}
+      <div class="fld"><label>이름<span class="req">*</span></label><input class="inp" placeholder="예: 홍길동" value="${esc(d.name)}" ${attr({ in: 'setup', k: 'name' })}></div>
+      <div class="fld"><label>농장 이름<span class="req">*</span></label><input class="inp" placeholder="예: OO농장" value="${esc(d.farmName)}" ${attr({ in: 'setup', k: 'farmName' })}></div>
+      <div class="fld"><label>농장 위치 (시군구)<span class="req">*</span><span class="opt">날씨 자동 입력에 사용</span></label><input class="inp" placeholder="예: 경상남도 OO군 OO면" value="${esc(d.location)}" ${attr({ in: 'setup', k: 'location' })}></div>
+      <div class="fld"><label>하우스 동<span class="req">*</span><span class="opt">동 이름 + 지번 + 작목</span></label>
+        ${houses}
+        <button class="ghost dash" data-act="addHouse">+ 하우스 동 추가</button>
+      </div>
+      ${S.setupErr ? `<p class="err" style="margin-bottom:10px">${esc(S.setupErr)}</p>` : ''}
+      ${!editing && CONFIG.features.demoData ? `<div class="card" style="background:#FAFAFA"><h3>시연용</h3><button class="ghost" style="margin:0" data-act="fillDemoFarm">가상 데모 농장으로 채우기</button><p class="mut" style="margin-top:6px">시설 토마토·방울토마토·딸기 가상 농장과 일지 20건을 넣어요 (가상 표시)</p></div>` : ''}
+    </div>
+    <div class="ftr"><button class="big sm" style="margin:0" data-act="saveSetup">${editing ? '저장' : '시작하기'}</button></div>
+  </section>`;
+}
+
+// ---------- 화면: 홈 (1안 바로 기록형 + 진행도 한 줄) ----------
+function monthStats() {
+  const ym = todayStr().slice(0, 7);
+  const recs = S.records.filter((r) => r.workDate.startsWith(ym));
+  const days = new Set(recs.map((r) => r.workDate)).size;
+  const inc = recs.filter((r) => missingFields(r).length).length;
+  return { month: Number(ym.slice(5)), days, inc };
+}
+
+function li(r) {
+  const [, m, d] = r.workDate.split('-').map(Number);
+  const mats = (r.materials || []).map((x) => `${x.kind} ${x.action}`).join(', ');
+  const inc = missingFields(r).length;
+  const title = r.task || r.stage || '작업 미입력';
+  return `<div class="li" ${attr({ act: 'openDetail', v: r.id })}>
+    <div class="dt"><b>${d}</b><span>${m}월 ${weekday(r.workDate)}</span></div>
+    <div class="ct"><p><b>${esc(title)}</b> <span class="t2">${esc(houseNames(S.profile, r.houseIds))} ${esc(r.crop)}</span></p>
+      <p class="s">${esc(weatherText(r.weather))}${mats ? ' · ' + esc(mats) : ''}</p></div>
+    <div class="tags">${inc ? '<span class="tag inc">미완성</span>' : ''}${r.demo ? '<span class="tag demo">가상</span>' : ''}</div>
+  </div>`;
+}
+
+function weatherLine(w, sub) {
+  const miss = !w || w.status === 'missing';
+  const t = weatherText(w);
+  return `<div class="wx${miss ? ' miss' : ''}"><div class="sq">${miss ? '미수집' : esc(w.sky || '-')}</div><div class="sp"><b>${esc(t)}</b><div class="mut">${esc(sub)}</div></div></div>`;
+}
+
+function vHome() {
+  const st = monthStats();
+  const today = todayStr();
+  const prog = CONFIG.showProgressLine
+    ? `<div class="prog"><b style="color:var(--ac)">${st.month}월 기록 ${st.days}일</b><span class="t2">· 빠진 항목 ${st.inc}건</span><span class="sp"></span><button class="lnk" data-act="listInc">보기</button></div>`
+    : '';
+  const recent = S.records.slice(0, 3).map(li).join('');
+  const wsub = `${locShort()} · ${weatherSourceLabel(S.todayWx)}`;
+  return `<section class="scr">
+    <div class="hd"><h1>${esc(S.profile.farmName)}</h1><button class="ic" data-act="go" data-v="me" aria-label="내 농장">내</button></div>
+    <div class="bd">
+      ${prog}
+      <button class="big" style="padding:30px 0;font-size:20px" data-act="newRecord">오늘 일지 쓰기<br><span style="font-size:13px;font-weight:400;opacity:.85">${mdText(today)} · 30초면 끝나요</span></button>
+      <div style="margin-bottom:12px">${weatherLine(S.todayWx, wsub)}</div>
+      <div class="card"><div class="row" style="margin-bottom:4px"><h3 style="margin:0">최근 기록</h3><span class="sp"></span><button class="lnk" data-act="go" data-v="list">전체</button></div>
+        ${recent || '<p class="empty">아직 기록이 없어요. 위 버튼으로 첫 일지를 써보세요</p>'}
+      </div>
+    </div></section>`;
+}
+
+// ---------- 화면: 일지 쓰기 ----------
+function ensureForm(id) {
+  if (S.form && (S.form.id || null) === (id || null)) return S.form;
+  if (id) {
+    const r = S.records.find((x) => x.id === id);
+    S.form = r ? JSON.parse(JSON.stringify(r)) : emptyRecord(S.profile);
+  } else {
+    S.form = emptyRecord(S.profile);
+  }
+  if (!S.form.area) S.form.area = { value: '', unit: '㎡' };
+  S.wxEdit = false;
+  S.detailEditing = !!S.form.detailEdited;
+  if (!S.form.weather) loadFormWeather();
+  return S.form;
+}
+
+async function loadFormWeather() {
+  const f = S.form;
+  const date = f.workDate;
+  const w = await getWeather(date, S.profile);
+  if (S.form === f && f.workDate === date && f.weather?.source !== 'manual') {
+    f.weather = w;
+    if (S.route === 'write') renderKeep();
+  }
+}
+
+function materialCard(m, i, crop) {
+  const P = m.kind === '농약';
+  const names = recentNames(S.records, m.kind);
+  return `<div class="mat">
+    <div class="row" style="margin-bottom:10px">
+      <div class="seg" style="flex:1">${['농약', '비료'].map((k) => `<button class="${m.kind === k ? 'on' : ''}" ${attr({ act: 'matKind', i, v: k })}>${k}</button>`).join('')}</div>
+      <div class="seg" style="flex:1">${['구입', '사용'].map((k) => `<button class="${m.action === k ? 'on' : ''}" ${attr({ act: 'matSet', i, k: 'action', v: k })}>${k}</button>`).join('')}</div>
+      <button class="lnk danger" ${attr({ act: 'rmMat', i })}>삭제</button></div>
+    <div class="fld"><label>${m.kind} 종류<span class="req">*</span></label><div class="chips">${chips(P ? PESTICIDE_TYPES : FERTILIZER_TYPES, m.type, 'matSet', { i, k: 'type' })}</div></div>
+    <div class="fld"><label>제품명<span class="req">*</span><span class="opt">최근 사용 + 직접 입력</span></label>
+      ${names.length ? `<div class="chips" style="margin-bottom:7px">${chips(names, m.name, 'matSet', { i, k: 'name' })}</div>` : ''}
+      <input class="inp" placeholder="직접 입력" value="${esc(m.name)}" ${attr({ in: 'mat', i, k: 'name' })}></div>
+    <div class="fld"><label>양 · 단위<span class="req">*</span></label>
+      <div class="qty"><input class="inp" inputmode="decimal" placeholder="숫자" value="${esc(m.qty)}" ${attr({ in: 'mat', i, k: 'qty' })}></div>
+      <div class="chips" style="margin-top:7px">${chips(P ? UNITS_PESTICIDE : UNITS_FERTILIZER, m.unit, 'matSet', { i, k: 'unit' })}</div></div>
+    ${P && m.action === '사용' ? `<div class="fld"><label>희석배수<span class="opt">선택</span></label><div class="chips">${DILUTIONS.map((x) => `<button class="chip${m.dilution === x ? ' on' : ''}" ${attr({ act: 'matToggle', i, k: 'dilution', v: x })}>${x}배</button>`).join('')}</div></div>
+    <div class="fld" style="margin:0"><label>대상 병해충<span class="opt">선택</span></label><div class="chips">${chips(pestsFor(crop), m.pest, 'matToggle', { i, k: 'pest' })}</div></div>` : ''}
+  </div>`;
+}
+
+function vWrite() {
+  const f = ensureForm(S.param);
+  const editing = !!f.id;
+  const tasks = tasksFor(f.crop)[f.stage] || [];
+  const w = f.weather;
+  const miss = !w || w.status === 'missing';
+  const wxSub = w ? `${w.rain != null && !miss ? `강수 ${w.rain}mm · ` : ''}${locShort()} · ${weatherSourceLabel(w)}` : '불러오는 중';
+  const wxEdit = S.wxEdit ? `<div class="wxedit">
+      <div class="fld" style="margin-bottom:10px"><label>하늘상태</label><div class="chips">${chips(SKY, miss ? '' : w.sky, 'wxSky')}</div></div>
+      <div class="row" style="margin-bottom:10px">
+        <input class="inp sm" inputmode="decimal" placeholder="최저 ℃" value="${esc(miss ? '' : w.tmin ?? '')}" ${attr({ in: 'wx', k: 'tmin' })}>
+        <input class="inp sm" inputmode="decimal" placeholder="최고 ℃" value="${esc(miss ? '' : w.tmax ?? '')}" ${attr({ in: 'wx', k: 'tmax' })}>
+        <input class="inp sm" inputmode="decimal" placeholder="강수 mm" value="${esc(miss ? '' : w.rain ?? '')}" ${attr({ in: 'wx', k: 'rain' })}></div>
+      <div class="row"><button class="lnk" data-act="wxAuto">자동값으로 되돌리기</button><span class="sp"></span><button class="lnk" data-act="wxClose">닫기</button></div>
+    </div>` : '';
+  return `<section class="scr">
+    <div class="hd"><button class="bk" data-act="back" aria-label="뒤로">&lt;</button><h1>${editing ? '일지 수정' : '일지 쓰기'}</h1><span class="mut">* 필수</span></div>
+    <div class="bd">
+      <div class="fld"><label>작업일<span class="req">*</span></label>
+        <div class="row"><input class="inp" type="date" style="flex:1" value="${esc(f.workDate)}" max="${todayStr()}" data-in="date">${f.workDate === todayStr() ? '<span class="tag ac">오늘</span>' : '<button class="chip" data-act="today">오늘</button>'}</div></div>
+      <div class="fld"><label>하우스 동<span class="req">*</span><span class="opt">여러 개 선택 가능</span></label>
+        <div class="chips">${S.profile.houses.map((h) => `<button class="chip${f.houseIds.includes(h.id) ? ' on' : ''}" ${attr({ act: 'toggleHouse', v: h.id })}>${esc(h.name)} <span class="lot">${esc(h.lot)}</span></button>`).join('')}</div></div>
+      <div class="fld"><label>작목<span class="req">*</span><span class="opt">동에 맞춰 자동</span></label><div class="chips">${chips(CROPS, f.crop, 'setCrop')}</div></div>
+      <div class="fld"><label>날씨<span class="opt">기상청 자동 · 눌러서 수정</span></label>
+        <div class="wx${miss ? ' miss' : ''}" data-act="wxToggle" style="cursor:pointer"><div class="sq">${miss ? '미수집' : esc(w.sky || '-')}</div><div class="sp"><b>${esc(w ? weatherText(w) : '...')}</b><div class="mut">${esc(wxSub)}</div></div><span class="lnk">수정</span></div>
+        ${wxEdit}</div>
+      <div class="fld"><label>작업단계<span class="req">*</span></label><div class="stg">${STAGES.map((x) => `<button class="${x === f.stage ? 'on' : ''}" ${attr({ act: 'setStage', v: x })}>${esc(x)}</button>`).join('')}</div></div>
+      <div class="fld"><label>세부 작업</label><div class="chips">${tasks.length ? chips(tasks, f.task, 'setTask') : '<span class="mut">작업단계를 먼저 골라주세요</span>'}</div></div>
+      <div class="fld"><label>농약 / 비료</label>
+        ${f.materials.map((m, i) => materialCard(m, i, f.crop)).join('')}
+        <button class="ghost dash" style="margin:0" data-act="addMat">+ 농약/비료 추가</button></div>
+      <div class="fld"><label>처리 면적<span class="opt">선택</span></label>
+        <div class="row"><input class="inp sm" style="width:120px;flex:none" inputmode="decimal" placeholder="숫자" value="${esc(f.area.value)}" data-in="areaValue" ${f.area.unit === '동 전체' ? 'disabled' : ''}><div class="chips">${chips(AREA_UNITS, f.area.unit, 'areaUnit')}</div></div></div>
+      <div class="fld"><label>세부작업내용<span class="opt">${S.detailEditing ? '직접 고친 문장' : '선택한 내용으로 자동 작성'}</span></label>
+        ${S.detailEditing
+          ? `<textarea class="inp" rows="3" data-in="detail">${esc(f.detail || autoText(S.profile, f))}</textarea><button class="lnk" data-act="detailAuto">자동 문장으로 되돌리기</button>`
+          : `<div class="auto" id="autoBox">${esc(autoText(S.profile, f))}</div><button class="lnk" data-act="detailEdit">직접 고치기</button>`}</div>
+      <div class="fld"><label>메모<span class="opt">키보드 음성 받아쓰기 가능</span></label><textarea class="inp" rows="2" placeholder="예: 아랫잎 위주로 방제" data-in="memo">${esc(f.memo)}</textarea></div>
+      <p class="mut" style="margin-bottom:6px">빈 칸이 있어도 저장되고 "미완성"으로 표시돼요</p>
+    </div>
+    <div class="ftr"><button class="big sm" style="margin:0" data-act="saveRecord" ${S.busy ? 'disabled' : ''}>저장</button></div>
+  </section>`;
+}
+
+function vSaved() {
+  const r = S.records.find((x) => x.id === S.param);
+  if (!r) return vList();
+  const mis = missingFields(r);
+  return `<section class="scr">
+    <div class="hd"><h1>저장 완료</h1></div>
+    <div class="bd white">
+      <div class="done">저장됨</div>
+      <h2 class="ctr" style="font-size:19px">일지를 저장했어요</h2>
+      <p class="ctr t2" style="margin:8px 0 6px;line-height:1.5">${esc(r.workDate)} · ${esc(houseNames(S.profile, r.houseIds) || '동 미선택')} · ${esc(r.task || r.stage || '작업')}</p>
+      <p class="ctr mut" style="margin-bottom:24px">${mis.length ? `<span class="tag inc">미완성</span> ${esc(mis.join(', '))} 빈칸 (나중에 채워도 돼요)` : '필수 항목을 모두 채웠어요'}</p>
+      <button class="big sm" data-act="go" data-v="list">일지 목록 보기</button>
+      <button class="ghost" data-act="newRecord">하나 더 쓰기</button>
+      <button class="ghost" data-act="go" data-v="home">홈으로</button>
+      <p class="mut ctr">입력 시각 ${esc(fmtDateTime(r.updatedAt || r.createdAt))} 자동 저장 (엑셀 시트2)</p>
+    </div></section>`;
+}
+
+// ---------- 화면: 일지 목록 ----------
+function vList() {
+  const f = S.listFilter;
+  let recs = S.records;
+  if (f === 'inc') recs = recs.filter((r) => missingFields(r).length);
+  else if (f !== 'all') recs = recs.filter((r) => r.houseIds.includes(f));
+  let body = '';
+  let curMonth = '';
+  for (const r of recs) {
+    const ym = r.workDate.slice(0, 7);
+    if (ym !== curMonth) {
+      curMonth = ym;
+      const n = recs.filter((x) => x.workDate.startsWith(ym)).length;
+      body += `<p class="month">${ym.slice(0, 4)}년 ${Number(ym.slice(5))}월 · ${n}건</p>`;
+    }
+    body += li(r);
+  }
+  const filters = [['all', '전체'], ...S.profile.houses.map((h) => [h.id, h.name]), ['inc', '미완성만']];
+  return `<section class="scr">
+    <div class="hd"><h1>일지</h1><button class="lnk" data-act="go" data-v="excel">엑셀 내보내기</button></div>
+    <div class="bd">
+      <div class="flt">${filters.map(([v, l]) => `<button class="chip${f === v ? ' on' : ''}" ${attr({ act: 'listFilter', v })}>${esc(l)}</button>`).join('')}</div>
+      <div class="card" style="padding:4px 14px 8px">${body || '<p class="empty">기록이 없어요</p>'}</div>
+      <div style="height:60px"></div>
+    </div>
+    <button class="big sm fab" data-act="newRecord">+ 일지 쓰기</button>
+  </section>`;
+}
+
+// ---------- 화면: 일지 상세 ----------
+function vDetail() {
+  const r = S.records.find((x) => x.id === S.param);
+  if (!r) return `<section class="scr"><div class="hd"><button class="bk" data-act="go" data-v="list">&lt;</button><h1>일지 상세</h1></div><div class="bd"><p class="empty">기록을 찾을 수 없어요</p></div></section>`;
+  const mis = missingFields(r);
+  const ed = CONFIG.features.editDelete;
+  let h = '';
+  if (mis.length) h += `<div class="prog inc"><span class="tag inc">미완성</span><span>${esc(mis.join(', '))} 빈칸</span><span class="sp"></span>${ed ? `<button class="lnk" ${attr({ act: 'editRecord', v: r.id })}>채우기</button>` : ''}</div>`;
+  const hs = housesOf(S.profile, r.houseIds).map((x) => `${x.name}${x.lot ? ` (${x.lot})` : ''}`).join(', ');
+  const w = r.weather;
+  h += `<div class="card">
+    <div class="kv"><span class="k">작업일</span><span class="v">${esc(r.workDate)} (${weekday(r.workDate)})</span></div>
+    <div class="kv"><span class="k">하우스 동</span><span class="v">${hs ? esc(hs) : '<span class="mut">빈칸</span>'}</span></div>
+    <div class="kv"><span class="k">작목</span><span class="v">${r.crop ? esc(r.crop) : '<span class="mut">빈칸</span>'}</span></div>
+    <div class="kv"><span class="k">날씨</span><span class="v">${esc(weatherText(w))}${w && w.status !== 'missing' && w.rain != null ? ` · 강수 ${w.rain}mm` : ''} <span class="mut">${esc(weatherSourceLabel(w))}</span></span></div>
+    <div class="kv"><span class="k">작업단계</span><span class="v">${r.stage ? esc(r.stage + (r.task ? ' > ' + r.task : '')) : '<span class="mut">빈칸</span>'}</span></div>
+    ${r.area?.value || r.area?.unit === '동 전체' ? `<div class="kv"><span class="k">처리 면적</span><span class="v">${esc(r.area.unit === '동 전체' ? '동 전체' : r.area.value + r.area.unit)}</span></div>` : ''}
+  </div>`;
+  (r.materials || []).forEach((m) => {
+    h += `<div class="card"><h3>${esc(m.kind)} ${esc(m.action)}</h3>
+      <div class="kv"><span class="k">종류</span><span class="v">${m.type ? esc(m.type) : '<span class="mut">빈칸</span>'}</span></div>
+      <div class="kv"><span class="k">제품명</span><span class="v">${m.name ? esc(m.name) : '<span class="mut">빈칸</span>'}</span></div>
+      <div class="kv"><span class="k">양</span><span class="v">${m.qty !== '' ? esc(m.qty + ' ' + m.unit) : '<span class="mut">빈칸</span>'}</span></div>
+      ${m.dilution ? `<div class="kv"><span class="k">희석배수</span><span class="v">${esc(m.dilution)}배</span></div>` : ''}
+      ${m.pest ? `<div class="kv"><span class="k">대상 병해충</span><span class="v">${esc(m.pest)}</span></div>` : ''}</div>`;
+  });
+  h += `<div class="card"><h3>세부작업내용</h3><p style="line-height:1.5">${esc(detailOf(S.profile, r))}</p>${r.memo ? `<p class="mut" style="margin-top:6px">메모: ${esc(r.memo)}</p>` : ''}</div>`;
+  h += `<div class="card" style="background:#FAFAFA"><p class="mut" style="line-height:1.6">작성 ${esc(fmtDateTime(r.createdAt))} · ${r.updatedAt ? '수정 ' + esc(fmtDateTime(r.updatedAt)) : '수정 없음'} · 작성자 ${esc(r.author || '')}${isBackfill(r) ? ' · 사후입력' : ''}${r.demo ? ' · 가상 데이터' : ''} (엑셀 시트2)</p></div>`;
+  if (ed) h += `<button class="ghost danger" ${attr({ act: 'deleteRecord', v: r.id })}>삭제</button>`;
+  return `<section class="scr">
+    <div class="hd"><button class="bk" data-act="go" data-v="list" aria-label="뒤로">&lt;</button><h1>일지 상세</h1>${ed ? `<button class="lnk" ${attr({ act: 'editRecord', v: r.id })}>수정</button>` : ''}</div>
+    <div class="bd">${h}</div></section>`;
+}
+
+// ---------- 화면: 엑셀 내보내기 ----------
+function excelRange() {
+  const e = S.excel;
+  const today = todayStr();
+  if (e.period === 'month') return { from: today.slice(0, 8) + '01', to: today };
+  if (e.period === 'all') {
+    const dates = S.records.map((r) => r.workDate).sort();
+    return { from: dates[0] || today.slice(0, 5) + '01-01', to: dates[dates.length - 1] > today ? dates[dates.length - 1] : today };
+  }
+  return { from: e.from || today.slice(0, 8) + '01', to: e.to || today };
+}
+
+function excelRecords() {
+  const { from, to } = excelRange();
+  return S.records.filter((r) => r.workDate >= from && r.workDate <= to);
+}
+
+function vExcel() {
+  const { from, to } = excelRange();
+  const recs = excelRecords();
+  const rows = buildSheet1Rows(S.profile, recs);
+  const L = 'ABCDEFGHIJKLM'.split('');
+  const prev = `<tr><th class="cl"></th>${L.map((l) => `<th class="cl">${l}</th>`).join('')}</tr>
+    <tr><td class="cl">1</td>${EXCEL_HEADERS.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>
+    ${rows.slice(0, 6).map((r, i) => `<tr><td class="cl">${i + 2}</td>${r.cells.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}
+    ${rows.length > 6 ? `<tr><td class="cl">...</td><td colspan="13" class="mut">총 ${rows.length}행</td></tr>` : ''}`;
+  const p = S.excel.period;
+  const share = canShareFile();
+  return `<section class="scr">
+    <div class="hd"><button class="bk" data-act="go" data-v="list" aria-label="뒤로">&lt;</button><h1>엑셀 내보내기</h1></div>
+    <div class="bd">
+      <div class="fld"><label>기간</label>
+        <div class="seg">${[['month', '이번 달'], ['all', '영농기간 전체'], ['custom', '직접 선택']].map(([v, l]) => `<button class="${p === v ? 'on' : ''}" ${attr({ act: 'excelPeriod', v })}>${l}</button>`).join('')}</div>
+        ${p === 'custom' ? `<div class="dates"><input class="inp" type="date" value="${esc(from)}" data-in="xFrom"><input class="inp" type="date" value="${esc(to)}" data-in="xTo"></div>` : ''}
+        <p class="mut" style="margin-top:6px">${esc(from)} ~ ${esc(to)} · 기록 ${recs.length}건, 자재 행 포함 ${rows.length}행</p></div>
+      <div class="card">
+        <h3>표준 영농기록장 양식 (농식품부 공익직불제)</h3>
+        <div class="chk"><b>1</b>시트1: 표준 영농기록장 순서 A~M열<br><b>2</b>1행은 머리글만, 셀 병합 없음<br><b>3</b>날짜는 날짜 형식, 빈 값은 0이 아닌 빈칸<br><b>4</b>농약·비료는 자재마다 1행<br><b>5</b>시트2: 작성·수정 시각, 사후입력 여부 (증빙 신뢰도)</div>
+      </div>
+      <div class="fld"><label>미리보기 (시트1)</label><div class="xlw"><table class="xl">${prev}</table></div></div>
+      <div class="card" style="background:#FAFAFA"><div class="mut">파일 이름</div><b style="font-size:13px;word-break:break-all">${esc(fileName(S.profile, from, to))}</b></div>
+    </div>
+    <div class="ftr">
+      <button class="big sm" style="margin:0" data-act="downloadXlsx" ${recs.length && !S.busy ? '' : 'disabled'}>${S.busy ? '만드는 중' : '엑셀 다운로드 (.xlsx)'}</button>
+      ${share ? `<button class="ghost" style="margin:8px 0 0" data-act="shareXlsx" ${recs.length ? '' : 'disabled'}>휴대폰 공유로 보내기</button>` : ''}
+    </div></section>`;
+}
+
+// ---------- 화면: 증빙 / 지원금 (준비 중 목업) ----------
+function vProof() {
+  return `<section class="scr">
+    <div class="hd"><h1>증빙</h1><span class="tag">준비 중 · P1</span></div>
+    <div class="bd">
+      <span class="mkb">준비 중 · MVP(11/23)에서는 목업 화면</span>
+      <div class="card ovl"><h3>증빙 완성도 (직불 점검 항목)</h3><div class="bar"><i style="width:72%"></i></div><p class="mut" style="margin-top:6px">구매·사용 내역, 경운, 수확·판매</p></div>
+      <div class="card ovl"><h3>작기 관리</h3><p class="mut">정식일, 수확개시일, 면적·주수</p></div>
+      <div class="card ovl"><h3>수확·출하 기록</h3><p class="mut">일자, 동, 수량, 판매처</p></div>
+      <div class="card ovl"><h3>영수증 보관함</h3><div class="row"><div class="ph" style="width:70px;height:70px">사진</div><div class="ph" style="width:70px;height:70px">사진</div><div class="ph" style="width:70px;height:70px">사진</div></div></div>
+      <div class="card ovl"><h3>재해 기록 · 보험 증빙 묶음 내보내기</h3><p class="mut">재해 일시·종류, 피해 동, 사진, 기간 일지 묶음</p></div>
+    </div></section>`;
+}
+
+function vSupport() {
+  return `<section class="scr">
+    <div class="hd"><h1>지원금</h1><span class="tag">준비 중 · P1</span></div>
+    <div class="bd">
+      <span class="mkb">준비 중 · MVP(11/23)에서는 목업 화면</span>
+      <div class="card ovl"><h3>조건 입력 3단계</h3><div class="step" style="justify-content:flex-start"><i class="on"></i><i></i><i></i></div><p class="mut">시군구 → 나이·경력 → 작목</p></div>
+      <div class="card ovl"><div class="row"><b>청년농 시설 지원 (예시)</b><span class="sp"></span><span class="tag ac">가능성 높음</span></div><p class="mut" style="margin-top:4px">마감 D-12 · 구비서류 4종</p></div>
+      <div class="card ovl"><div class="row"><b>스마트팜 보급 (예시)</b><span class="sp"></span><span class="tag">확인 필요</span></div></div>
+      <div class="card ovl"><div class="row"><b>귀농 정착 지원 (예시)</b><span class="sp"></span><span class="tag">해당 안 될 가능성</span></div></div>
+      <div class="card ovl"><h3>신청 가이드</h3><p class="mut">공식 신청처(농업e지, 정부24)로 이동. 신청 대행 아님</p></div>
+    </div></section>`;
+}
+
+// ---------- 화면: 내 농장 ----------
+function vMe() {
+  const p = S.profile;
+  const hasDemo = S.records.some((r) => r.demo);
+  return `<section class="scr">
+    <div class="hd"><button class="bk" data-act="go" data-v="home" aria-label="뒤로">&lt;</button><h1>내 농장</h1></div>
+    <div class="bd">
+      <div class="card"><h3>프로필</h3>
+        <div class="kv"><span class="k">이름</span><span class="v">${esc(p.name)}</span></div>
+        <div class="kv"><span class="k">이메일</span><span class="v">${esc(S.session.email)}</span></div>
+        <div class="kv"><span class="k">농장</span><span class="v">${esc(p.farmName)}</span></div>
+        <div class="kv"><span class="k">위치</span><span class="v">${esc(p.location)}</span></div></div>
+      <div class="card"><h3>하우스 동</h3>${p.houses.map((h) => `<div class="kv"><span class="k">${esc(h.name)}</span><span class="v">${esc(h.lot)} <span class="tag ac">${esc(h.crop)}</span></span></div>`).join('')}</div>
+      <button class="ghost" data-act="editSetup">하우스 동·작목 관리</button>
+      ${CONFIG.features.demoData ? (hasDemo
+        ? '<button class="ghost" data-act="removeDemo">가상 데모 일지 지우기</button>'
+        : '<button class="ghost" data-act="addDemo">가상 데모 일지 넣기 (20건)</button>') : ''}
+      ${S.installEvt ? '<button class="ghost" data-act="install">홈 화면에 설치</button>' : ''}
+      <button class="ghost danger" data-act="logout">로그아웃</button>
+      <p class="mut ctr" style="margin-top:10px">농사 처방 v${APP_VERSION} · 저장소 ${esc(CONFIG.storage)} · 로그인 ${esc(CONFIG.auth)} · 날씨 ${esc(CONFIG.weather)}</p>
+    </div></section>`;
+}
+
+// ---------- 렌더 ----------
+const VIEWS = { login: vLogin, sent: vSent, setup: vSetup, home: vHome, write: vWrite, saved: vSaved, list: vList, detail: vDetail, excel: vExcel, proof: vProof, support: vSupport, me: vMe };
+
+function parseHash() {
+  const h = location.hash.replace(/^#\/?/, '');
+  const [route, param] = h.split('/');
+  return { route: route || '', param: param ? decodeURIComponent(param) : null };
+}
+
+function guard(route) {
+  if (!S.session) return route === 'sent' ? 'sent' : 'login';
+  if (!S.profile) return 'setup';
+  if (!VIEWS[route] || route === 'login' || route === 'sent') return 'home';
+  return route;
+}
+
+function render() {
+  const { route, param } = parseHash();
+  const r = guard(route);
+  if (r !== route) {
+    location.replace('#/' + r);
+    return;
+  }
+  if (S.route !== r) {
+    if (r !== 'write') S.form = r === 'saved' ? S.form : null;
+    if (r !== 'setup') { S.setup = null; S.setupErr = ''; }
+  }
+  S.route = r;
+  S.param = param;
+  $app.innerHTML = layout(VIEWS[r](), r);
+}
+
+function renderKeep() {
+  const bd = $app.querySelector('.bd');
+  const top = bd ? bd.scrollTop : 0;
+  render();
+  const bd2 = $app.querySelector('.bd');
+  if (bd2) bd2.scrollTop = top;
+}
+
+async function reload() {
+  S.records = S.session && S.profile ? await S.store.listRecords(S.session.uid) : [];
+}
+
+// ---------- 동작 ----------
+async function seedDemo() {
+  const recs = buildDemoRecords(S.profile, S.profile.name, S.session.email);
+  await S.store.saveRecordsBulk(S.session.uid, recs);
+  await reload();
+}
+
+const ACTIONS = {
+  go: (el) => go(el.dataset.v),
+  back: () => history.length > 1 ? history.back() : go('home'),
+
+  async sendLink() {
+    const email = document.getElementById('email').value.trim();
+    if (!isValidEmail(email)) {
+      S.loginErr = '이메일 주소를 확인해 주세요';
+      return render();
+    }
+    S.loginErr = '';
+    try {
+      await auth.sendLink(email);
+      go('sent');
+    } catch (e) {
+      S.loginErr = '메일을 보내지 못했어요: ' + e.message;
+      render();
+    }
+  },
+  async resend() {
+    const email = auth.getPendingEmail();
+    if (email) await auth.sendLink(email);
+    toast(CONFIG.auth === 'demo' ? '링크를 다시 보냈어요 (시연)' : '링크를 다시 보냈어요');
+  },
+  async completeDemoLink() {
+    S.session = await auth.completeDemoLink();
+    S.profile = await S.store.getProfile(S.session.uid);
+    await reload();
+    go(S.profile ? 'home' : 'setup');
+  },
+  async demoAccount() {
+    S.session = await auth.demoAccount();
+    S.profile = await S.store.getProfile(S.session.uid);
+    if (!S.profile) {
+      S.profile = await S.store.saveProfile(S.session.uid, JSON.parse(JSON.stringify(DEMO_PROFILE)));
+      await seedDemo();
+    }
+    await reload();
+    go('home');
+  },
+  async logout() {
+    if (!confirm('로그아웃할까요?')) return;
+    await auth.signOut();
+    S.session = null;
+    S.profile = null;
+    S.records = [];
+    go('login');
+  },
+
+  // 설정
+  addHouse() {
+    const d = setupDraft();
+    const n = d.houses.length + 1;
+    d.houses.push({ id: 'h' + Date.now().toString(36), name: `${n}동`, lot: '', crop: d.houses[d.houses.length - 1]?.crop || '토마토' });
+    renderKeep();
+  },
+  rmHouse(el) {
+    setupDraft().houses.splice(Number(el.dataset.i), 1);
+    renderKeep();
+  },
+  houseCrop(el) {
+    setupDraft().houses[Number(el.dataset.i)].crop = el.dataset.v;
+    renderKeep();
+  },
+  async fillDemoFarm() {
+    S.setup = JSON.parse(JSON.stringify(DEMO_PROFILE));
+    await ACTIONS.saveSetup(null, true);
+  },
+  async saveSetup(_el, withDemo = false) {
+    const d = setupDraft();
+    d.houses.forEach((h) => { h.name = h.name.trim(); h.lot = h.lot.trim(); });
+    const errs = [];
+    if (!d.name?.trim()) errs.push('이름');
+    if (!d.farmName?.trim()) errs.push('농장 이름');
+    if (!d.location?.trim()) errs.push('농장 위치');
+    if (!d.houses.length || d.houses.some((h) => !h.name || !h.crop)) errs.push('하우스 동 이름·작목');
+    if (new Set(d.houses.map((h) => h.name)).size !== d.houses.length) errs.push('동 이름 중복');
+    if (errs.length) {
+      S.setupErr = errs.join(', ') + ' 을(를) 확인해 주세요';
+      return renderKeep();
+    }
+    const first = !S.profile;
+    S.profile = await S.store.saveProfile(S.session.uid, { ...(S.profile || {}), ...d, name: d.name.trim(), farmName: d.farmName.trim(), location: d.location.trim() });
+    S.setup = null;
+    if (withDemo) await seedDemo();
+    await reload();
+    toast(first ? '농장을 등록했어요' : '저장했어요');
+    go(first ? 'home' : 'me');
+  },
+  editSetup() {
+    S.setup = null;
+    go('setup');
+  },
+  async addDemo() {
+    await seedDemo();
+    toast('가상 데모 일지 20건을 넣었어요');
+    render();
+  },
+  async removeDemo() {
+    if (!confirm('가상 데모 일지를 모두 지울까요? 직접 쓴 일지는 남아요')) return;
+    await S.store.deleteDemoRecords(S.session.uid);
+    await reload();
+    toast('가상 데모 일지를 지웠어요');
+    render();
+  },
+  async install() {
+    if (!S.installEvt) return;
+    S.installEvt.prompt();
+    await S.installEvt.userChoice;
+    S.installEvt = null;
+    render();
+  },
+
+  // 일지 쓰기
+  newRecord() {
+    S.form = null;
+    go('write');
+  },
+  editRecord(el) {
+    S.form = null;
+    go('write/' + el.dataset.v);
+  },
+  today() {
+    S.form.workDate = todayStr();
+    if (S.form.weather?.source !== 'manual') { S.form.weather = null; loadFormWeather(); }
+    renderKeep();
+  },
+  toggleHouse(el) {
+    const f = S.form;
+    const id = el.dataset.v;
+    f.houseIds = f.houseIds.includes(id) ? f.houseIds.filter((x) => x !== id) : [...f.houseIds, id];
+    if (!f.cropManual) {
+      const c = cropOf(S.profile, f.houseIds);
+      if (c && c !== f.crop) {
+        f.crop = c;
+        if (!(tasksFor(c)[f.stage] || []).includes(f.task)) f.task = '';
+      }
+    }
+    renderKeep();
+  },
+  setCrop(el) {
+    S.form.crop = el.dataset.v;
+    S.form.cropManual = true;
+    if (!(tasksFor(S.form.crop)[S.form.stage] || []).includes(S.form.task)) S.form.task = '';
+    renderKeep();
+  },
+  setStage(el) {
+    const f = S.form;
+    f.stage = el.dataset.v;
+    const T = tasksFor(f.crop)[f.stage] || [];
+    f.task = T.length === 1 ? T[0] : '';
+    renderKeep();
+  },
+  setTask(el) {
+    S.form.task = S.form.task === el.dataset.v ? '' : el.dataset.v;
+    renderKeep();
+  },
+  addMat() {
+    const last = S.form.materials[S.form.materials.length - 1];
+    S.form.materials.push(newMaterial(last ? last.kind : (S.form.task === '병해충 방제' ? '농약' : '비료')));
+    renderKeep();
+  },
+  rmMat(el) {
+    S.form.materials.splice(Number(el.dataset.i), 1);
+    renderKeep();
+  },
+  matKind(el) {
+    const i = Number(el.dataset.i);
+    if (S.form.materials[i].kind === el.dataset.v) return;
+    const a = S.form.materials[i].action;
+    S.form.materials[i] = { ...newMaterial(el.dataset.v), action: a };
+    renderKeep();
+  },
+  matSet(el) {
+    const m = S.form.materials[Number(el.dataset.i)];
+    m[el.dataset.k] = el.dataset.v;
+    if (el.dataset.k === 'action' && el.dataset.v === '구입') { m.dilution = ''; m.pest = ''; }
+    renderKeep();
+  },
+  matToggle(el) {
+    const m = S.form.materials[Number(el.dataset.i)];
+    m[el.dataset.k] = m[el.dataset.k] === el.dataset.v ? '' : el.dataset.v;
+    renderKeep();
+  },
+  areaUnit(el) {
+    S.form.area.unit = el.dataset.v;
+    if (el.dataset.v === '동 전체') S.form.area.value = '';
+    renderKeep();
+  },
+  wxToggle() {
+    S.wxEdit = !S.wxEdit;
+    renderKeep();
+  },
+  wxClose() {
+    S.wxEdit = false;
+    renderKeep();
+  },
+  wxSky(el) {
+    const w = S.form.weather && S.form.weather.status !== 'missing' ? S.form.weather : { ...missingWeather(), tmin: null, tmax: null, rain: null };
+    S.form.weather = { ...w, status: 'ok', sky: el.dataset.v, source: 'manual', reason: '' };
+    renderKeep();
+  },
+  async wxAuto() {
+    S.form.weather = null;
+    S.wxEdit = false;
+    renderKeep();
+    await loadFormWeather();
+  },
+  detailEdit() {
+    S.form.detail = autoText(S.profile, S.form);
+    S.form.detailEdited = true;
+    S.detailEditing = true;
+    renderKeep();
+  },
+  detailAuto() {
+    S.form.detail = '';
+    S.form.detailEdited = false;
+    S.detailEditing = false;
+    renderKeep();
+  },
+  async saveRecord() {
+    if (S.busy) return;
+    const f = S.form;
+    S.busy = true;
+    try {
+      const rec = {
+        ...f,
+        weather: f.weather || missingWeather('미수집'),
+        materials: f.materials.map((m) => ({ ...m, qty: String(m.qty ?? '').trim() })),
+        detail: f.detailEdited ? f.detail : autoText(S.profile, f),
+        author: f.author || S.profile.name,
+        authorEmail: f.authorEmail || S.session.email,
+        location: S.profile.location,
+        demo: !!f.demo,
+      };
+      rec.missing = missingFields(rec);
+      const saved = await S.store.saveRecord(S.session.uid, rec);
+      await reload();
+      S.form = null;
+      go('saved/' + saved.id);
+    } catch (e) {
+      toast('저장하지 못했어요: ' + e.message);
+    } finally {
+      S.busy = false;
+    }
+  },
+
+  // 목록·상세
+  openDetail(el) {
+    go('detail/' + el.dataset.v);
+  },
+  listFilter(el) {
+    S.listFilter = el.dataset.v;
+    renderKeep();
+  },
+  listInc() {
+    S.listFilter = 'inc';
+    go('list');
+  },
+  async deleteRecord(el) {
+    if (!confirm('이 일지를 삭제할까요? 되돌릴 수 없어요')) return;
+    await S.store.deleteRecord(S.session.uid, el.dataset.v);
+    await reload();
+    toast('삭제했어요');
+    go('list');
+  },
+
+  // 엑셀
+  excelPeriod(el) {
+    S.excel.period = el.dataset.v;
+    if (el.dataset.v === 'custom' && !S.excel.from) {
+      const r = excelRange();
+      S.excel.from = r.from;
+      S.excel.to = r.to;
+    }
+    renderKeep();
+  },
+  async downloadXlsx() {
+    await makeXlsx(false);
+  },
+  async shareXlsx() {
+    await makeXlsx(true);
+  },
+};
+
+async function makeXlsx(share) {
+  const { from, to } = excelRange();
+  const recs = excelRecords();
+  if (!recs.length) return toast('기간 안에 기록이 없어요');
+  S.busy = true;
+  renderKeep();
+  try {
+    const blob = await buildWorkbook(S.profile, S.session, recs);
+    const name = fileName(S.profile, from, to);
+    if (share) await shareBlob(blob, name);
+    else downloadBlob(blob, name);
+    S.lastExport = { name, size: blob.size, rows: buildSheet1Rows(S.profile, recs).length, at: new Date().toISOString() };
+    window.__lastExport = S.lastExport;
+    toast(`${name} 저장`);
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('엑셀을 만들지 못했어요: ' + e.message);
+  } finally {
+    S.busy = false;
+    renderKeep();
+  }
+}
+
+// 입력값 (다시 그리지 않고 상태만 갱신해 커서 유지)
+function onInput(e) {
+  const el = e.target;
+  const k = el.dataset.in;
+  if (!k) return;
+  const v = el.value;
+  if (k === 'setup') setupDraft()[el.dataset.k] = v;
+  else if (k === 'house') setupDraft().houses[Number(el.dataset.i)][el.dataset.k] = v;
+  else if (k === 'mat') S.form.materials[Number(el.dataset.i)][el.dataset.k] = v;
+  else if (k === 'memo') S.form.memo = v;
+  else if (k === 'detail') S.form.detail = v;
+  else if (k === 'areaValue') S.form.area.value = v.trim();
+  else if (k === 'wx') {
+    const w = S.form.weather && S.form.weather.status !== 'missing' ? S.form.weather : { ...missingWeather(), sky: '' };
+    const n = v.trim() === '' ? null : Number(v);
+    S.form.weather = { ...w, status: 'ok', [el.dataset.k]: Number.isFinite(n) ? n : null, source: 'manual', reason: '' };
+    const only = S.form.weather;
+    if (!only.sky && only.tmin == null && only.tmax == null && only.rain == null) S.form.weather = missingWeather('직접 비움 (미수집)');
+  }
+  const box = document.getElementById('autoBox');
+  if (box && S.form) box.textContent = autoText(S.profile, S.form);
+}
+
+function onChange(e) {
+  const el = e.target;
+  const k = el.dataset.in;
+  if (k === 'date') {
+    S.form.workDate = el.value || todayStr();
+    if (S.form.weather?.source !== 'manual') {
+      S.form.weather = null;
+      loadFormWeather();
+    }
+    renderKeep();
+  } else if (k === 'xFrom' || k === 'xTo') {
+    S.excel[k === 'xFrom' ? 'from' : 'to'] = el.value;
+    renderKeep();
+  } else if (k === 'wx') {
+    renderKeep();
+  }
+}
+
+$app.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-act]');
+  if (!el || el.disabled) return;
+  const fn = ACTIONS[el.dataset.act];
+  if (!fn) return;
+  e.preventDefault();
+  try {
+    await fn(el);
+  } catch (err) {
+    console.error(err);
+    toast('오류: ' + err.message);
+  }
+});
+$app.addEventListener('input', onInput);
+$app.addEventListener('change', onChange);
+$app.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'email') ACTIONS.sendLink();
+});
+window.addEventListener('hashchange', render);
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  S.installEvt = e;
+});
+
+// ---------- 시작 ----------
+async function start() {
+  S.store = await getStore();
+  try {
+    S.session = await auth.init();
+  } catch (e) {
+    console.error(e);
+    S.session = auth.getSession();
+  }
+  if (S.session) {
+    S.profile = await S.store.getProfile(S.session.uid);
+    await reload();
+  }
+  S.todayWx = await getWeather(todayStr(), S.profile);
+  render();
+  if (CONFIG.features.pwa && 'serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW 등록 실패', e));
+  }
+}
+
+start();

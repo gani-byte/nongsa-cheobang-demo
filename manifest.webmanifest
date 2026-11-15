@@ -1,0 +1,18 @@
+{
+  "name": "농사 처방",
+  "short_name": "농사 처방",
+  "description": "기록하면 표준 영농기록장 엑셀이 바로 나오는 영농일지 앱",
+  "lang": "ko",
+  "start_url": "./#/home",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F3F3F3",
+  "theme_color": "#1F7A4D",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
